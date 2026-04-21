@@ -12,6 +12,12 @@ Once installed globally, you can enter any project and run:
 codex_timer
 ```
 
+The CLI also supports changing the UI language directly:
+
+```bash
+codex_timer -lang
+```
+
 ## What it does
 
 - Create a new Codex session or resume an existing one
@@ -50,6 +56,34 @@ npm i -g codex-timer
 ```
 
 ## First run tutorial
+
+### Language preference
+
+On the first launch, `codex_timer` asks for your preferred language:
+
+- Chinese
+- English
+
+This preference is stored globally in:
+
+```text
+~/.codex_timer/preferences.json
+```
+
+After that, the same language will be used by default in every project.
+
+If you want to change it later, run:
+
+```bash
+codex_timer -lang
+```
+
+You can also switch directly with:
+
+```bash
+codex_timer -lang en
+codex_timer -lang zh
+```
 
 ### 1. Enter a project directory
 
@@ -115,6 +149,12 @@ This means every project keeps its own:
 - saved responses
 
 Nothing is mixed across different projects.
+
+Global user preferences such as language are stored separately under:
+
+```text
+~/.codex_timer/preferences.json
+```
 
 ## Modes
 
@@ -206,6 +246,21 @@ Try:
 
 ```bash
 npm i -g codex-timer
+```
+
+### The interface language is wrong
+
+Change it at any time with:
+
+```bash
+codex_timer -lang
+```
+
+Or set it directly:
+
+```bash
+codex_timer -lang en
+codex_timer -lang zh
 ```
 
 ### `codex: command not found`

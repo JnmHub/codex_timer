@@ -12,6 +12,12 @@
 codex_timer
 ```
 
+如果你想单独修改界面语言，也可以直接执行：
+
+```bash
+codex_timer -lang
+```
+
 ## 它能做什么
 
 - 交互式创建新会话或恢复已有会话
@@ -50,6 +56,34 @@ npm i -g codex-timer
 ```
 
 ## 使用教程
+
+### 语言偏好
+
+第一次启动 `codex_timer` 时，会先让用户选择偏好语言：
+
+- 中文
+- English
+
+这个偏好会全局保存到：
+
+```text
+~/.codex_timer/preferences.json
+```
+
+以后在任何项目里运行时，默认都会使用这个语言。
+
+如果你之后想修改语言，可以执行：
+
+```bash
+codex_timer -lang
+```
+
+也可以直接指定：
+
+```bash
+codex_timer -lang zh
+codex_timer -lang en
+```
 
 ### 第一步：进入你要操作的项目目录
 
@@ -117,6 +151,12 @@ your-project/
 - 响应保存文件
 
 不同项目之间不会互相污染。
+
+而用户全局偏好（比如界面语言）会单独保存在：
+
+```text
+~/.codex_timer/preferences.json
+```
 
 ## 运行模式说明
 
@@ -211,13 +251,28 @@ npm test
 npm i -g codex-timer
 ```
 
-### 2. 执行时提示找不到 `codex`
+### 2. 界面语言不对
+
+你可以随时执行：
+
+```bash
+codex_timer -lang
+```
+
+或者直接指定：
+
+```bash
+codex_timer -lang zh
+codex_timer -lang en
+```
+
+### 3. 执行时提示找不到 `codex`
 
 `codex_timer` 依赖本机已经安装的 `codex` CLI。
 
 如果 `codex` 命令本身不能运行，`codex_timer` 也无法工作。
 
-### 3. 当前目录没有列出任何会话
+### 4. 当前目录没有列出任何会话
 
 一般有两种原因：
 
@@ -226,7 +281,7 @@ npm i -g codex-timer
 
 这时直接创建一个新会话即可。
 
-### 4. 最近消息预览看起来不对
+### 5. 最近消息预览看起来不对
 
 消息预览来自本地 `~/.codex/sessions` 里的 JSONL 文件。
 
