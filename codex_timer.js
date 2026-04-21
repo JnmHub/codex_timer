@@ -16,6 +16,69 @@ const SESSION_ROOT = path.join(os.homedir(), ".codex", "sessions");
 const DEFAULT_INTERVAL_SECONDS = 300;
 const DEFAULT_MESSAGE = "检查当前状态，有什么更新吗？";
 const DEFAULT_CONTINUOUS_DELAY_SECONDS = 3;
+const DEFAULT_APPROVAL_POLICY = "never";
+const DEFAULT_SANDBOX_MODE = "danger-full-access";
+const DEFAULT_TRUST_LEVEL = "trusted";
+const APPROVAL_POLICY_OPTIONS = [
+  {
+    key: "1",
+    value: "never",
+    label: "不确认（默认）",
+    description: "完全自动执行，风险最高。",
+  },
+  {
+    key: "2",
+    value: "on-request",
+    label: "需要确认",
+    description: "敏感操作时请求确认，较稳妥。",
+  },
+  {
+    key: "3",
+    value: "untrusted",
+    label: "仅不可信操作确认",
+    description: "只在不可信操作时确认，自动化更强。",
+  },
+  {
+    key: "4",
+    value: "on-failure",
+    label: "失败后再确认",
+    description: "先尝试执行，失败后再请求确认。",
+  },
+];
+const SANDBOX_MODE_OPTIONS = [
+  {
+    key: "1",
+    value: "danger-full-access",
+    label: "danger-full-access（默认）",
+    description: "无沙箱限制，所有文件操作都允许，自动化最强。",
+  },
+  {
+    key: "2",
+    value: "workspace-write",
+    label: "workspace-write",
+    description: "允许读和工作区写入，更保守。",
+  },
+  {
+    key: "3",
+    value: "read-only",
+    label: "read-only",
+    description: "只读模式，不能写文件。",
+  },
+];
+const TRUST_LEVEL_OPTIONS = [
+  {
+    key: "1",
+    value: "trusted",
+    label: "trusted（默认）",
+    description: "当前目录视为可信，更适合自动执行。",
+  },
+  {
+    key: "2",
+    value: "untrusted",
+    label: "untrusted",
+    description: "当前目录视为不可信，通常更保守。",
+  },
+];
 const CRON_FIELD_RANGES = {
   minute: [0, 59],
   hour: [0, 23],
@@ -265,16 +328,39 @@ class CodexTimer {
   async getCodex() {
     if (!this.codex) {
       const sdk = await import("@openai/codex-sdk");
-      this.codex = new sdk.Codex();
+      this.codex = new sdk.Codex(this.getCodexOptions());
     }
     return this.codex;
   }
 
-  getThreadOptions() {
+  getCodexOptions() {
     return {
+      config: {
+        trust_level: this.getTrustLevel(),
+      },
+    };
+  }
+
+  getThreadOptions() {
+    const options = {
       workingDirectory: PROJECT_DIR,
       skipGitRepoCheck: true,
+      sandboxMode: this.getSandboxMode(),
+      approvalPolicy: this.getApprovalPolicy(),
     };
+    return options;
+  }
+
+  getApprovalPolicy() {
+    return this.config.approval_policy || DEFAULT_APPROVAL_POLICY;
+  }
+
+  getSandboxMode() {
+    return this.config.sandbox_mode || DEFAULT_SANDBOX_MODE;
+  }
+
+  getTrustLevel() {
+    return this.config.trust_level || DEFAULT_TRUST_LEVEL;
   }
 
   async closePrompt() {
@@ -391,6 +477,88 @@ class CodexTimer {
     return `固定间隔: ${this.config.interval_seconds || DEFAULT_INTERVAL_SECONDS} 秒`;
   }
 
+  describeApprovalPolicy() {
+    const policy = this.getApprovalPolicy();
+    const mapping = {
+      never: "不确认",
+      "on-request": "需要确认",
+      untrusted: "仅不可信操作确认",
+      "on-failure": "失败后再确认",
+    };
+    return mapping[policy] || policy;
+  }
+
+  describeSandboxMode() {
+    const mode = this.getSandboxMode();
+    const mapping = {
+      "danger-full-access": "danger-full-access",
+      "workspace-write": "workspace-write",
+      "read-only": "read-only",
+    };
+    return mapping[mode] || mode;
+  }
+
+  describeTrustLevel() {
+    const level = this.getTrustLevel();
+    const mapping = {
+      trusted: "trusted",
+      untrusted: "untrusted",
+    };
+    return mapping[level] || level;
+  }
+
+  async promptChoice(title, options, defaultValue) {
+    const currentOption = options.find((option) => option.value === defaultValue) || options[0];
+    console.log(`\n${title}`);
+    options.forEach((option) => {
+      console.log(`${option.key}. ${option.label}`);
+      console.log(`   ${option.description}`);
+    });
+
+    while (true) {
+      const choice = await this.prompt(`\n请选择 [默认: ${currentOption.key}]: `);
+      const selected = options.find((option) => option.key === (choice || currentOption.key));
+      if (selected) {
+        return selected.value;
+      }
+      console.log("❌ 请输入有效选项");
+    }
+  }
+
+  async promptApprovalPolicy() {
+    this.config.approval_policy = await this.promptChoice(
+      "🔐 安全确认设置：",
+      APPROVAL_POLICY_OPTIONS,
+      this.getApprovalPolicy(),
+    );
+  }
+
+  async promptSandboxMode() {
+    this.config.sandbox_mode = await this.promptChoice(
+      "📦 沙箱模式设置：",
+      SANDBOX_MODE_OPTIONS,
+      this.getSandboxMode(),
+    );
+  }
+
+  async promptTrustLevel() {
+    this.config.trust_level = await this.promptChoice(
+      "🛡️ 信任级别设置：",
+      TRUST_LEVEL_OPTIONS,
+      this.getTrustLevel(),
+    );
+  }
+
+  async rebindThreadWithCurrentConfig() {
+    this.codex = null;
+    const codex = await this.getCodex();
+    if (this.sessionId) {
+      this.thread = codex.resumeThread(this.sessionId, this.getThreadOptions());
+      return;
+    }
+    this.thread = codex.startThread(this.getThreadOptions());
+  }
+
   async selectLocalSession() {
     const sessions = await this.listLocalSessions();
     if (sessions.length === 0) {
@@ -463,6 +631,9 @@ class CodexTimer {
       console.log("\n📌 发现已有配置：");
       console.log(`   调度方式: ${this.describeSchedule()}`);
       console.log(`   消息模式: ${this.config.message_mode}`);
+      console.log(`   沙箱模式: ${this.describeSandboxMode()}`);
+      console.log(`   审批策略: ${this.describeApprovalPolicy()}`);
+      console.log(`   信任级别: ${this.describeTrustLevel()}`);
       if (this.config.preset_message) {
         console.log(`   预设消息: ${this.config.preset_message}`);
       }
@@ -539,6 +710,10 @@ class CodexTimer {
       console.log("❌ 请输入 1-5");
     }
 
+    await this.promptSandboxMode();
+    await this.promptApprovalPolicy();
+    await this.promptTrustLevel();
+
     console.log("\n📝 任务内容设置：");
     if (this.config.schedule_mode === "continuous") {
       console.log("连续执行模式固定使用同一条消息。");
@@ -567,6 +742,9 @@ class CodexTimer {
     console.log(`   会话 ID: ${this.sessionId || "新会话（首次执行后保存）"}`);
     console.log(`   调度方式: ${this.describeSchedule()}`);
     console.log(`   消息模式: ${this.config.message_mode}`);
+    console.log(`   沙箱模式: ${this.describeSandboxMode()}`);
+    console.log(`   审批策略: ${this.describeApprovalPolicy()}`);
+    console.log(`   信任级别: ${this.describeTrustLevel()}`);
     console.log("   请求超时: 不限制");
     if (this.config.preset_message) {
       console.log(`   预设消息: ${this.config.preset_message}`);
@@ -608,6 +786,7 @@ class CodexTimer {
     }
 
     await this.setupTimerConfig();
+    await this.rebindThreadWithCurrentConfig();
     return true;
   }
 
