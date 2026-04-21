@@ -1,0 +1,24 @@
+{
+  "name": "codex-timer",
+  "version": "0.1.0",
+  "description": "Run Codex sessions from the current project directory.",
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "codex_timer": "./codex_timer.js"
+  },
+  "files": [
+    "codex_timer.js",
+    "README.md",
+    "README_ZH.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.cjs"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "^0.122.0"
+  }
+}

@@ -1,0 +1,21 @@
+# Build artifacts
+build/
+dist/
+
+# Node
+node_modules/
+.npm-cache/
+
+# Local runtime data
+.codex_timer/
+
+# IDE / editor
+.idea/
+.vscode/
+
+# OMX / local agent state
+.omx/
+
+# OS files
+.DS_Store
+/tests/
