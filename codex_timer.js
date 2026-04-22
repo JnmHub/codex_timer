@@ -8,6 +8,7 @@ const { execFile } = require("node:child_process");
 const readline = require("node:readline/promises");
 
 const PROJECT_DIR = path.resolve(process.cwd());
+const PACKAGE_FILE = path.join(__dirname, "package.json");
 const HOME_CONFIG_DIR = path.join(os.homedir(), ".codex_timer");
 const HOME_PREFERENCES_FILE = path.join(HOME_CONFIG_DIR, "preferences.json");
 const CONFIG_DIR = path.join(PROJECT_DIR, ".codex_timer");
@@ -156,6 +157,16 @@ async function loadHomePreferences() {
     return typeof parsed === "object" && parsed !== null ? parsed : {};
   } catch {
     return {};
+  }
+}
+
+async function getPackageVersion() {
+  try {
+    const raw = await fsp.readFile(PACKAGE_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed.version || "unknown";
+  } catch {
+    return "unknown";
   }
 }
 
@@ -1456,6 +1467,9 @@ async function initializeLanguagePreference(forcePrompt = false, explicitLanguag
 
 function parseCliArguments(argv) {
   const args = argv.slice(2);
+  if (args.includes("-v") || args.includes("--version")) {
+    return { mode: "version" };
+  }
   const langIndex = args.findIndex((arg) => arg === "-lang" || arg === "--lang");
   if (langIndex !== -1) {
     return {
@@ -1468,6 +1482,10 @@ function parseCliArguments(argv) {
 
 async function cli(argv = process.argv) {
   const parsedArgs = parseCliArguments(argv);
+  if (parsedArgs.mode === "version") {
+    process.stdout.write(`${await getPackageVersion()}\n`);
+    return;
+  }
   if (parsedArgs.mode === "set-language") {
     await initializeLanguagePreference(true, parsedArgs.value);
     console.log(tr("当前语言已切换", "Current language updated"));
@@ -1516,6 +1534,7 @@ module.exports = {
   CONFIG_DIR,
   HOME_PREFERENCES_FILE,
   LANGUAGE_OPTIONS,
+  getPackageVersion,
   normalizeLanguage,
   parseCliArguments,
   quoteAppleScriptString,

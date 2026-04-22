@@ -1,6 +1,6 @@
 {
   "name": "codex-timer",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Run Codex sessions from the current project directory.",
   "license": "MIT",
   "type": "commonjs",
