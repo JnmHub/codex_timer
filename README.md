@@ -28,6 +28,8 @@ codex_timer -lang
 - Support simplified cron mode
 - Support continuous mode
   starts the next run 3 seconds after the previous one finishes
+- Support auto-stop keywords
+  automatically stop the current loop when the Codex response contains a matching keyword
 - Do not enforce a request timeout by default
 
 ## Requirements
@@ -129,6 +131,24 @@ Depending on the mode, you can:
 - manually enter the first message and reuse it automatically later
 - in continuous mode, always reuse the same preset message
 
+### 6. Configure auto-stop keywords
+
+You can optionally set one or more stop keywords.
+
+When any future Codex response contains one of these keywords, `codex_timer` will automatically stop the current loop.
+
+Examples:
+
+```text
+done
+finished
+任务完成
+```
+
+You can enter multiple keywords separated by commas.
+
+If you leave this field empty, the feature stays disabled.
+
 ## Runtime files
 
 When you run `codex_timer` inside a project, it creates:
@@ -197,6 +217,14 @@ Good for:
 - long-running autonomous workflows
 - repeated pipeline-style prompts
 - “keep going until I stop it” loops
+
+### Auto-stop keywords
+
+This is not a separate scheduling mode.
+
+It is an optional stopping condition that works together with the selected mode.
+
+If the Codex output contains any configured stop keyword, the current automation loop ends immediately.
 
 ## Session behavior
 
@@ -283,3 +311,13 @@ You can simply create a new session.
 The preview is extracted from local session JSONL files under `~/.codex/sessions`.
 
 If the session file format changes in future Codex versions, the preview extraction logic may need to be updated.
+
+### The task does not stop automatically
+
+Check whether:
+
+- auto-stop keywords are configured
+- the returned Codex response actually contains one of those keywords
+- the keyword matches exactly as a substring
+
+If no keyword matches, the loop will continue normally.

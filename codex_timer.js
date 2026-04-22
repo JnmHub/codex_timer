@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
+const { execFile } = require("node:child_process");
 const readline = require("node:readline/promises");
 
 const PROJECT_DIR = path.resolve(process.cwd());
@@ -103,6 +104,20 @@ const CRON_FIELD_RANGES = {
   month: [1, 12],
   weekday: [0, 7],
 };
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const ANSI = {
+  reset: "\x1b[0m",
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  cyan: "\x1b[36m",
+  green: "\x1b[32m",
+  yellow: "\x1b[33m",
+  red: "\x1b[31m",
+  blue: "\x1b[34m",
+  magenta: "\x1b[35m",
+  gray: "\x1b[90m",
+};
+let STATUS_LINE_ACTIVE = false;
 
 async function ensureWritableDirectory(dirPath) {
   await fsp.mkdir(dirPath, { recursive: true });
@@ -182,14 +197,255 @@ function formatLogLine(level, message) {
   return `${timestamp} - ${level} - ${message}`;
 }
 
+function supportsColor() {
+  return Boolean(process.stdout && process.stdout.isTTY);
+}
+
+function paint(text, ...codes) {
+  if (!supportsColor()) {
+    return text;
+  }
+  return `${codes.join("")}${text}${ANSI.reset}`;
+}
+
+function toneColor(tone) {
+  if (tone === "success") return ANSI.green;
+  if (tone === "warning") return ANSI.yellow;
+  if (tone === "error") return ANSI.red;
+  if (tone === "accent") return ANSI.magenta;
+  return ANSI.cyan;
+}
+
+function stripAnsi(text) {
+  return String(text).replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function charDisplayWidth(char) {
+  const codePoint = char.codePointAt(0);
+  if (codePoint === undefined) {
+    return 0;
+  }
+  if (
+    codePoint <= 0x1f ||
+    (codePoint >= 0x7f && codePoint <= 0x9f) ||
+    (codePoint >= 0x300 && codePoint <= 0x36f) ||
+    (codePoint >= 0xfe00 && codePoint <= 0xfe0f)
+  ) {
+    return 0;
+  }
+  if (
+    (
+      (codePoint >= 0x2600 && codePoint <= 0x27bf) ||
+      (codePoint >= 0x1f000 && codePoint <= 0x1faff) ||
+      (codePoint >= 0x1100 &&
+        (
+          codePoint <= 0x115f ||
+          codePoint === 0x2329 ||
+          codePoint === 0x232a ||
+          (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f) ||
+          (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+          (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+          (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+          (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+          (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+          (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+          (codePoint >= 0x1f300 && codePoint <= 0x1faf6) ||
+          (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+        ))
+    )
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+function displayWidth(text) {
+  let width = 0;
+  for (const char of stripAnsi(text)) {
+    width += charDisplayWidth(char);
+  }
+  return width;
+}
+
+function padRight(text, width) {
+  return text + " ".repeat(Math.max(0, width - displayWidth(text)));
+}
+
+function wrapText(text, width) {
+  const source = stripAnsi(String(text));
+  if (width <= 0) {
+    return [source];
+  }
+
+  const wrappedLines = [];
+  const rawLines = source.split("\n");
+
+  for (const rawLine of rawLines) {
+    if (rawLine.length === 0) {
+      wrappedLines.push("");
+      continue;
+    }
+
+    let current = "";
+    let currentWidth = 0;
+
+    for (const char of rawLine) {
+      const charWidth = charDisplayWidth(char);
+      if (currentWidth > 0 && currentWidth + charWidth > width) {
+        wrappedLines.push(current.trimEnd());
+        current = char === " " ? "" : char;
+        currentWidth = char === " " ? 0 : charWidth;
+      } else {
+        current += char;
+        currentWidth += charWidth;
+      }
+    }
+
+    if (current.length > 0) {
+      wrappedLines.push(current.trimEnd());
+    }
+  }
+
+  return wrappedLines.length > 0 ? wrappedLines : [""];
+}
+
+function writeConsoleLine(text = "") {
+  if (STATUS_LINE_ACTIVE && process.stdout.isTTY) {
+    process.stdout.clearLine(0);
+    process.stdout.cursorTo(0);
+    STATUS_LINE_ACTIVE = false;
+  }
+  process.stdout.write(`${text}\n`);
+}
+
+function writeStatusLine(text) {
+  if (!process.stdout.isTTY) {
+    writeConsoleLine(text);
+    return;
+  }
+  process.stdout.clearLine(0);
+  process.stdout.cursorTo(0);
+  process.stdout.write(text);
+  STATUS_LINE_ACTIVE = true;
+}
+
+function clearStatusLine() {
+  if (!process.stdout.isTTY || !STATUS_LINE_ACTIVE) {
+    return;
+  }
+  process.stdout.clearLine(0);
+  process.stdout.cursorTo(0);
+  STATUS_LINE_ACTIVE = false;
+}
+
+function printSection(title, tone = "info") {
+  writeConsoleLine("");
+  writeConsoleLine(paint(title, ANSI.bold, toneColor(tone)));
+}
+
+function terminalWidth() {
+  return process.stdout && process.stdout.columns ? process.stdout.columns : 100;
+}
+
+function constrainPanelWidth(width) {
+  return Math.max(20, Math.min(width, terminalWidth() - 4));
+}
+
+function printPanel(title, lines = [], tone = "info", options = {}) {
+  const content = [title, ...lines].map((line) => String(line));
+  const naturalWidth = Math.max(...content.map((line) => displayWidth(line)), 0);
+  const width = constrainPanelWidth(options.width || naturalWidth);
+  const titleLines = wrapText(title, width);
+  const renderedLines = lines.flatMap((line) => wrapText(line, width));
+  const horizontal = "─".repeat(width + 2);
+  const borderColor = toneColor(tone);
+  writeConsoleLine(paint(`┌${horizontal}┐`, borderColor));
+  titleLines.forEach((line) => {
+    writeConsoleLine(paint(`│ ${padRight(line, width)} │`, borderColor, ANSI.bold));
+  });
+  if (renderedLines.length > 0) {
+    writeConsoleLine(paint(`├${horizontal}┤`, borderColor));
+    for (const line of renderedLines) {
+      writeConsoleLine(paint(`│ ${padRight(line, width)} │`, borderColor));
+    }
+  }
+  writeConsoleLine(paint(`└${horizontal}┘`, borderColor));
+}
+
+function kv(label, value) {
+  return `${label}: ${String(value)}`;
+}
+
+function panelGroupWidth(panels) {
+  const naturalWidth = Math.max(
+    ...panels.flatMap((panel) => [panel.title, ...(panel.lines || [])]).map((line) => displayWidth(String(line))),
+    0,
+  );
+  return constrainPanelWidth(naturalWidth);
+}
+
 async function appendLog(level, message) {
   const line = `${formatLogLine(level, message)}\n`;
   await fsp.appendFile(LOG_FILE, line, "utf8");
+  const timestamp = new Date().toISOString().replace("T", " ").replace("Z", "");
+  const coloredLevel =
+    level === "ERROR"
+      ? paint(level, ANSI.bold, ANSI.red)
+      : level === "INFO"
+        ? paint(level, ANSI.bold, ANSI.blue)
+        : paint(level, ANSI.bold, ANSI.yellow);
+  const consoleLine = `${paint(timestamp, ANSI.gray)} ${coloredLevel} ${message}`;
   if (level === "ERROR") {
-    process.stderr.write(line);
+    clearStatusLine();
+    process.stderr.write(`${consoleLine}\n`);
   } else {
-    process.stdout.write(line);
+    writeConsoleLine(consoleLine);
   }
+}
+
+function quoteAppleScriptString(text) {
+  return `"${String(text).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function triggerTerminalBell() {
+  if (process.stdout && process.stdout.isTTY) {
+    process.stdout.write("\u0007");
+  }
+}
+
+function sendMacNotification(title, message) {
+  if (process.platform !== "darwin") {
+    return;
+  }
+  const script = `display notification ${quoteAppleScriptString(message)} with title ${quoteAppleScriptString(title)}`;
+  execFile("osascript", ["-e", script], () => {
+    // Notifications are best-effort. Ignore failures quietly.
+  });
+}
+
+function requestMacDockAttention() {
+  if (process.platform !== "darwin") {
+    return;
+  }
+  const script = `
+ObjC.import('AppKit');
+$.NSApplication.sharedApplication;
+$.NSApp.requestUserAttention($.NSInformationalRequest);
+`;
+  execFile("osascript", ["-l", "JavaScript", "-e", script], () => {
+    // Dock attention is best-effort. Ignore failures quietly.
+  });
+}
+
+function notifyTaskFinished(taskNumber, message, outcome = "success") {
+  triggerTerminalBell();
+  requestMacDockAttention();
+  sendMacNotification(
+    outcome === "success"
+      ? tr(`Codex 任务 #${taskNumber} 完成`, `Codex Task #${taskNumber} Finished`)
+      : tr(`Codex 任务 #${taskNumber} 失败`, `Codex Task #${taskNumber} Failed`),
+    normalizePreview(message, 60),
+  );
 }
 
 function normalizePreview(text, limit = 80) {
@@ -418,7 +674,10 @@ class CodexTimer {
     this.sessionId = null;
     this.config = {};
     this.running = true;
+    this.stopping = false;
     this.taskCounter = 0;
+    this.waitTimeout = null;
+    this.waitResolver = null;
     this.readline = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
@@ -617,16 +876,16 @@ class CodexTimer {
 
   async promptChoice(title, options, defaultValue) {
     const currentOption = options.find((option) => option.value === defaultValue) || options[0];
-    console.log(`\n${title}`);
+    printSection(title, "accent");
     options.forEach((option) => {
       const label = typeof option.getLabel === "function" ? option.getLabel() : option.label;
       const description = typeof option.getDescription === "function" ? option.getDescription() : option.description;
-      console.log(`${option.key}. ${label}`);
-      console.log(`   ${description}`);
+      writeConsoleLine(`${paint(option.key, ANSI.bold, ANSI.cyan)}. ${label}`);
+      writeConsoleLine(`   ${paint(description, ANSI.dim)}`);
     });
 
     while (true) {
-      const choice = await this.prompt(`\n请选择 [默认: ${currentOption.key}]: `);
+      const choice = await this.prompt(`\n${tr("请选择", "Choose")} [${tr("默认", "default")}: ${currentOption.key}]: `);
       const selected = options.find((option) => option.key === (choice || currentOption.key));
       if (selected) {
         return selected.value;
@@ -661,8 +920,8 @@ class CodexTimer {
 
   async promptStopKeywords() {
     const currentValue = Array.isArray(this.config.stop_keywords) ? this.config.stop_keywords.join(", ") : "";
-    console.log(tr("\n🛑 自动停止关键词：", "\n🛑 Auto-stop keywords:"));
-    console.log(
+    printSection(tr("🛑 自动停止关键词", "🛑 Auto-stop keywords"), "warning");
+    writeConsoleLine(
       tr(
         "当 Codex 输出包含任意关键词时，自动结束当前任务循环。多个关键词用英文逗号分隔，留空表示禁用。",
         "When the Codex output contains any keyword, the current task loop stops automatically. Separate multiple keywords with commas. Leave empty to disable.",
@@ -685,16 +944,26 @@ class CodexTimer {
   async selectLocalSession() {
     const sessions = await this.listLocalSessions();
     if (sessions.length === 0) {
-      console.log(tr("⚠️  当前目录没有找到可恢复的会话", "⚠️  No resumable sessions were found for the current directory"));
+      printPanel(
+        tr("当前目录没有可恢复会话", "No resumable sessions for this directory"),
+        [tr("你可以直接创建一个新会话继续。", "You can create a new session and continue.")],
+        "warning",
+      );
       return null;
     }
 
-    console.log(tr("\n当前目录最近会话：", "\nRecent sessions for the current directory:"));
-    sessions.forEach((session, index) => {
-      console.log(`${index + 1}. ${session.id}`);
-      console.log(`   ${tr("时间", "Time")}: ${String(session.timestamp).replace("T", " ").replace("Z", "")}`);
-      console.log(`   ${tr("目录", "Directory")}: ${session.cwd}`);
-      console.log(`   ${tr("最近消息", "Latest message")}: ${session.lastUserMessage}`);
+    printSection(tr("当前目录最近会话", "Recent sessions for the current directory"), "info");
+    const sessionPanels = sessions.map((session, index) => ({
+      title: `${index + 1}. ${session.id}`,
+      lines: [
+        kv(tr("时间", "Time"), String(session.timestamp).replace("T", " ").replace("Z", "")),
+        kv(tr("目录", "Directory"), session.cwd),
+        kv(tr("最近消息", "Latest message"), session.lastUserMessage),
+      ],
+    }));
+    const width = panelGroupWidth(sessionPanels);
+    sessionPanels.forEach((panel) => {
+      printPanel(panel.title, panel.lines, "info", { width });
     });
 
     while (true) {
@@ -712,12 +981,15 @@ class CodexTimer {
   }
 
   async interactiveSelectSession() {
-    console.log(`\n${"=".repeat(60)}`);
-    console.log(tr("💬 Codex 会话设置", "💬 Codex Session Setup"));
-    console.log("=".repeat(60));
-    console.log(tr("1. 创建新会话", "1. Create a new session"));
-    console.log(tr("2. 从当前目录最近会话中选择", "2. Select from recent sessions for this directory"));
-    console.log(tr("q. 退出", "q. Quit"));
+    printPanel(
+      tr("💬 Codex 会话设置", "💬 Codex Session Setup"),
+      [
+        tr("1. 创建新会话", "1. Create a new session"),
+        tr("2. 从当前目录最近会话中选择", "2. Select from recent sessions for this directory"),
+        tr("q. 退出", "q. Quit"),
+      ],
+      "accent",
+    );
 
     while (true) {
       const choice = (await this.prompt(tr("\n请选择 (1/2/q): ", "\nChoose (1/2/q): "))).toLowerCase();
@@ -726,7 +998,7 @@ class CodexTimer {
         this.thread = codex.startThread(this.getThreadOptions());
         this.sessionId = null;
         await appendLog("INFO", tr("已创建新的 Codex 会话，首次执行后会自动保存会话 ID", "Created a new Codex session. The session ID will be saved after the first run"));
-        console.log(tr("✅ 已创建新会话", "✅ New session created"));
+        printPanel(tr("新会话已创建", "New session created"), [kv(tr("状态", "Status"), tr("等待首次执行后保存会话 ID", "Session ID will be saved after the first run"))], "success");
         return true;
       }
       if (choice === "2") {
@@ -738,7 +1010,7 @@ class CodexTimer {
         this.thread = codex.resumeThread(sessionId, this.getThreadOptions());
         this.sessionId = sessionId;
         await appendLog("INFO", tr(`已恢复会话: ${sessionId}`, `Resumed session: ${sessionId}`));
-        console.log(tr(`✅ 已恢复会话: ${sessionId}`, `✅ Resumed session: ${sessionId}`));
+        printPanel(tr("会话已恢复", "Session resumed"), [kv(tr("会话 ID", "Session ID"), sessionId)], "success");
         return true;
       }
       if (choice === "q") {
@@ -751,31 +1023,35 @@ class CodexTimer {
   async setupTimerConfig() {
     const hasExisting = Boolean(this.config.schedule_mode && this.config.message_mode);
     if (hasExisting) {
-      console.log(tr("\n📌 发现已有配置：", "\n📌 Existing configuration found:"));
-      console.log(`   ${tr("调度方式", "Schedule")}: ${this.describeSchedule()}`);
-      console.log(`   ${tr("消息模式", "Message mode")}: ${this.config.message_mode}`);
-      console.log(`   ${tr("沙箱模式", "Sandbox mode")}: ${this.describeSandboxMode()}`);
-      console.log(`   ${tr("审批策略", "Approval policy")}: ${this.describeApprovalPolicy()}`);
-      console.log(`   ${tr("信任级别", "Trust level")}: ${this.describeTrustLevel()}`);
-      console.log(`   ${tr("停止关键词", "Stop keywords")}: ${this.describeStopKeywords()}`);
+      const lines = [
+        kv(tr("调度方式", "Schedule"), this.describeSchedule()),
+        kv(tr("消息模式", "Message mode"), this.config.message_mode),
+        kv(tr("沙箱模式", "Sandbox mode"), this.describeSandboxMode()),
+        kv(tr("审批策略", "Approval policy"), this.describeApprovalPolicy()),
+        kv(tr("信任级别", "Trust level"), this.describeTrustLevel()),
+        kv(tr("停止关键词", "Stop keywords"), this.describeStopKeywords()),
+      ];
       if (this.config.preset_message) {
-        console.log(`   ${tr("预设消息", "Preset message")}: ${this.config.preset_message}`);
+        lines.push(kv(tr("预设消息", "Preset message"), this.config.preset_message));
       }
+      printPanel(tr("📌 发现已有配置", "📌 Existing configuration found"), lines, "info");
 
       if (await this.promptYesNo(tr("是否继续使用当前配置", "Keep using the current configuration"), true)) {
         return;
       }
     }
 
-    console.log(`\n${"=".repeat(60)}`);
-    console.log(tr("⏰ 定时任务配置", "⏰ Schedule Configuration"));
-    console.log("=".repeat(60));
-    console.log(tr("\n执行间隔设置：", "\nScheduling modes:"));
-    console.log(tr("1. 每 N 秒", "1. Every N seconds"));
-    console.log(tr("2. 每 N 分钟", "2. Every N minutes"));
-    console.log(tr("3. 每 N 小时", "3. Every N hours"));
-    console.log(tr("4. 自定义 cron 表达式", "4. Custom cron expression"));
-    console.log(tr("5. 连续执行（上次结束后等待 3 秒自动继续）", "5. Continuous mode (wait 3 seconds after each run)"));
+    printPanel(
+      tr("⏰ 定时任务配置", "⏰ Schedule Configuration"),
+      [
+        tr("1. 每 N 秒", "1. Every N seconds"),
+        tr("2. 每 N 分钟", "2. Every N minutes"),
+        tr("3. 每 N 小时", "3. Every N hours"),
+        tr("4. 自定义 cron 表达式", "4. Custom cron expression"),
+        tr("5. 连续执行（上次结束后等待 3 秒自动继续）", "5. Continuous mode (wait 3 seconds after each run)"),
+      ],
+      "accent",
+    );
 
     while (true) {
       const choice = await this.prompt(tr("\n请选择 (1-5): ", "\nChoose (1-5): "));
@@ -839,7 +1115,7 @@ class CodexTimer {
     await this.promptTrustLevel();
     await this.promptStopKeywords();
 
-    console.log(tr("\n📝 任务内容设置：", "\n📝 Message Configuration:"));
+    printSection(tr("📝 任务内容设置", "📝 Message Configuration"), "accent");
     if (this.config.schedule_mode === "continuous") {
       console.log(tr("连续执行模式固定使用同一条消息。", "Continuous mode always uses the same preset message."));
       const defaultMessage = this.config.preset_message || this.config.last_message || defaultMessage();
@@ -863,18 +1139,20 @@ class CodexTimer {
 
     await this.persistRuntimeState();
 
-    console.log(tr("\n✅ 配置完成！", "\n✅ Configuration saved!"));
-    console.log(`   ${tr("会话 ID", "Session ID")}: ${this.sessionId || tr("新会话（首次执行后保存）", "New session (saved after the first run)")}`);
-    console.log(`   ${tr("调度方式", "Schedule")}: ${this.describeSchedule()}`);
-    console.log(`   ${tr("消息模式", "Message mode")}: ${this.config.message_mode}`);
-    console.log(`   ${tr("沙箱模式", "Sandbox mode")}: ${this.describeSandboxMode()}`);
-    console.log(`   ${tr("审批策略", "Approval policy")}: ${this.describeApprovalPolicy()}`);
-    console.log(`   ${tr("信任级别", "Trust level")}: ${this.describeTrustLevel()}`);
-    console.log(`   ${tr("停止关键词", "Stop keywords")}: ${this.describeStopKeywords()}`);
-    console.log(`   ${tr("请求超时", "Request timeout")}: ${tr("不限制", "Unlimited")}`);
+    const summaryLines = [
+      kv(tr("会话 ID", "Session ID"), this.sessionId || tr("新会话（首次执行后保存）", "New session (saved after the first run)")),
+      kv(tr("调度方式", "Schedule"), this.describeSchedule()),
+      kv(tr("消息模式", "Message mode"), this.config.message_mode),
+      kv(tr("沙箱模式", "Sandbox mode"), this.describeSandboxMode()),
+      kv(tr("审批策略", "Approval policy"), this.describeApprovalPolicy()),
+      kv(tr("信任级别", "Trust level"), this.describeTrustLevel()),
+      kv(tr("停止关键词", "Stop keywords"), this.describeStopKeywords()),
+      kv(tr("请求超时", "Request timeout"), tr("不限制", "Unlimited")),
+    ];
     if (this.config.preset_message) {
-      console.log(`   ${tr("预设消息", "Preset message")}: ${this.config.preset_message}`);
+      summaryLines.push(kv(tr("预设消息", "Preset message"), this.config.preset_message));
     }
+    printPanel(tr("✅ 配置完成", "✅ Configuration saved"), summaryLines, "success");
   }
 
   async initialize() {
@@ -885,7 +1163,14 @@ class CodexTimer {
     const savedSessionId = this.config.session_id;
 
     if (savedSessionId && localSessionIds.has(savedSessionId)) {
-      console.log(tr(`\n📌 发现保存的会话: ${savedSessionId}`, `\n📌 Found a saved session: ${savedSessionId}`));
+      printPanel(
+        tr("📌 发现保存的会话", "📌 Found a saved session"),
+        [
+          kv(tr("会话 ID", "Session ID"), savedSessionId),
+          kv(tr("项目目录", "Project"), PROJECT_DIR),
+        ],
+        "info",
+      );
       if (await this.promptYesNo(tr("是否使用这个会话", "Use this session"), true)) {
         this.thread = this.codex.resumeThread(savedSessionId, this.getThreadOptions());
         this.sessionId = savedSessionId;
@@ -895,8 +1180,14 @@ class CodexTimer {
         return false;
       }
     } else if (savedSessionId) {
-      console.log(tr(`\n⚠️ 已忽略保存的会话: ${savedSessionId}`, `\n⚠️ Ignored saved session: ${savedSessionId}`));
-      console.log(tr("   该会话不属于当前脚本目录", "   This session does not belong to the current directory"));
+      printPanel(
+        tr("⚠️ 已忽略保存的会话", "⚠️ Ignored saved session"),
+        [
+          kv(tr("会话 ID", "Session ID"), savedSessionId),
+          kv(tr("原因", "Reason"), tr("该会话不属于当前脚本目录", "This session does not belong to the current directory")),
+        ],
+        "warning",
+      );
       if (!(await this.interactiveSelectSession())) {
         await appendLog("ERROR", tr("用户取消了会话初始化", "The user cancelled session initialization"));
         return false;
@@ -943,6 +1234,34 @@ class CodexTimer {
     return { seconds: interval, nextRun: new Date(now.getTime() + interval * 1000) };
   }
 
+  async waitForNextRun(seconds) {
+    if (seconds <= 0) {
+      return;
+    }
+    await new Promise((resolve) => {
+      this.waitResolver = resolve;
+      this.waitTimeout = setTimeout(() => {
+        this.waitTimeout = null;
+        this.waitResolver = null;
+        resolve();
+      }, seconds * 1000);
+    });
+  }
+
+  stopNow() {
+    this.running = false;
+    this.stopping = true;
+    if (this.waitTimeout) {
+      clearTimeout(this.waitTimeout);
+      this.waitTimeout = null;
+    }
+    if (this.waitResolver) {
+      const resolve = this.waitResolver;
+      this.waitResolver = null;
+      resolve();
+    }
+  }
+
   async runCodexTurn(message) {
     const turn = await this.thread.run(message);
     if (this.thread.id && this.thread.id !== this.sessionId) {
@@ -954,21 +1273,30 @@ class CodexTimer {
   async executeTask(message) {
     this.taskCounter += 1;
     const startedAt = new Date();
-    console.log(`\n${"=".repeat(60)}`);
-    console.log(tr(`📌 任务 #${this.taskCounter} - ${formatDateTime(startedAt)}`, `📌 Task #${this.taskCounter} - ${formatDateTime(startedAt)}`));
-    console.log(tr(`📤 发送: ${message}`, `📤 Sending: ${message}`));
-    console.log("=".repeat(60));
-    console.log(tr("⏳ 正在等待 Codex 响应，不限制超时时间...", "⏳ Waiting for a Codex response with no timeout..."));
+    printPanel(
+      tr(`📌 任务 #${this.taskCounter}`, `📌 Task #${this.taskCounter}`),
+      [
+        kv(tr("开始时间", "Started"), formatDateTime(startedAt)),
+        kv(tr("发送内容", "Prompt"), message),
+      ],
+      "accent",
+    );
 
     let elapsed = 0;
+    let spinnerIndex = 0;
     const progressTimer = setInterval(() => {
-      elapsed += 5;
-      console.log(tr(`   已等待 ${elapsed} 秒...`, `   Waited ${elapsed} seconds...`));
-    }, 5000);
+      elapsed += 1;
+      const frame = SPINNER_FRAMES[spinnerIndex % SPINNER_FRAMES.length];
+      spinnerIndex += 1;
+      writeStatusLine(
+        `${paint(frame, ANSI.cyan)} ${tr("等待 Codex 响应", "Waiting for Codex response")} ${paint(`${elapsed}s`, ANSI.bold, ANSI.yellow)}`,
+      );
+    }, 1000);
 
     try {
       const response = await this.runCodexTurn(message);
       clearInterval(progressTimer);
+      clearStatusLine();
 
       this.config.last_message = message;
       await this.persistRuntimeState();
@@ -984,29 +1312,47 @@ class CodexTimer {
       ].join("\n");
       await fsp.writeFile(responseFile, output, "utf8");
 
-      console.log(tr(`\n📥 响应摘要 (长度: ${response.length} 字符):`, `\n📥 Response preview (length: ${response.length} chars):`));
-      console.log("-".repeat(40));
-      console.log(response.length > 500 ? `${response.slice(0, 500)}...` : response);
-      console.log("-".repeat(40));
-      console.log(tr(`✅ 完整响应已保存到: ${responseFile}`, `✅ Full response saved to: ${responseFile}`));
-
+      const preview = response.length > 500 ? `${response.slice(0, 500)}...` : response;
       await appendLog("INFO", tr(`任务 #${this.taskCounter} 执行成功`, `Task #${this.taskCounter} completed successfully`));
       const matchedKeyword = matchStopKeyword(response, this.config.stop_keywords || []);
+      printPanel(
+        tr(`✅ 任务 #${this.taskCounter} 完成`, `✅ Task #${this.taskCounter} Completed`),
+        [
+          kv(tr("耗时", "Duration"), `${elapsed}s`),
+          kv(tr("响应长度", "Response length"), `${response.length}`),
+          kv(tr("保存位置", "Saved to"), responseFile),
+          kv(tr("停止关键词", "Stop keyword"), matchedKeyword || tr("未命中", "No match")),
+        ],
+        "success",
+      );
+      printPanel(tr("📥 响应摘要", "📥 Response Preview"), preview.split("\n"), "info");
       if (matchedKeyword) {
         this.running = false;
         await appendLog(
           "INFO",
           tr(`命中停止关键词，自动结束任务: ${matchedKeyword}`, `Matched stop keyword, ending task automatically: ${matchedKeyword}`),
         );
-        console.log(
-          tr(`🛑 命中停止关键词，已自动结束任务: ${matchedKeyword}`, `🛑 Matched stop keyword. Task stopped automatically: ${matchedKeyword}`),
+        printPanel(
+          tr("🛑 已自动结束任务", "🛑 Task Stopped Automatically"),
+          [kv(tr("命中关键词", "Matched keyword"), matchedKeyword)],
+          "warning",
         );
       }
+      notifyTaskFinished(this.taskCounter, preview, "success");
       return { success: true, response, matchedKeyword };
     } catch (error) {
       clearInterval(progressTimer);
+      clearStatusLine();
       await appendLog("ERROR", tr(`任务执行失败: ${error.message}`, `Task failed: ${error.message}`));
-      console.log(tr(`❌ 任务执行失败: ${error.message}`, `❌ Task failed: ${error.message}`));
+      printPanel(
+        tr(`❌ 任务 #${this.taskCounter} 失败`, `❌ Task #${this.taskCounter} Failed`),
+        [
+          kv(tr("耗时", "Duration"), `${elapsed}s`),
+          kv(tr("错误", "Error"), error.message),
+        ],
+        "error",
+      );
+      notifyTaskFinished(this.taskCounter, error.message, "error");
       return { success: false, response: "", matchedKeyword: null };
     }
   }
@@ -1017,14 +1363,22 @@ class CodexTimer {
       return;
     }
 
-    console.log(`\n${"=".repeat(60)}`);
-    console.log(tr("🚀 定时任务已启动", "🚀 Timer started"));
-    console.log("=".repeat(60));
-    console.log(`${tr("会话", "Session")}: ${this.sessionId || tr("新会话（首次执行后保存）", "New session (saved after the first run)")}`);
-    console.log(`${tr("调度", "Schedule")}: ${this.describeSchedule()}`);
-    console.log(`${tr("模式", "Mode")}: ${this.config.message_mode || "manual"}`);
-    console.log(tr("按 Ctrl+C 停止", "Press Ctrl+C to stop"));
-    console.log("=".repeat(60));
+    printPanel(
+      tr("🚀 定时任务已启动", "🚀 Timer Started"),
+      [
+        kv(tr("项目目录", "Project"), PROJECT_DIR),
+        kv(tr("语言", "Language"), ACTIVE_LANGUAGE),
+        kv(tr("会话", "Session"), this.sessionId || tr("新会话（首次执行后保存）", "New session (saved after the first run)")),
+        kv(tr("调度", "Schedule"), this.describeSchedule()),
+        kv(tr("模式", "Mode"), this.config.message_mode || "manual"),
+        kv(tr("沙箱", "Sandbox"), this.describeSandboxMode()),
+        kv(tr("审批", "Approval"), this.describeApprovalPolicy()),
+        kv(tr("信任", "Trust"), this.describeTrustLevel()),
+        kv(tr("停止关键词", "Stop keywords"), this.describeStopKeywords()),
+        tr("按 Ctrl+C 停止", "Press Ctrl+C to stop"),
+      ],
+      "success",
+    );
 
     const initialMessage = await this.getMessageToSend(true);
     if (initialMessage) {
@@ -1036,8 +1390,10 @@ class CodexTimer {
 
     while (this.running) {
       const { seconds, nextRun } = this.getNextDelay();
-      console.log(tr(`\n⏱️  下次执行时间: ${formatDateTime(nextRun)}`, `\n⏱️  Next run: ${formatDateTime(nextRun)}`));
-      await sleep(seconds * 1000);
+      writeConsoleLine(
+        `${paint("⏱", ANSI.cyan)} ${tr("下次执行时间", "Next run")} ${paint(formatDateTime(nextRun), ANSI.bold)} ${paint(`(+${seconds}s)`, ANSI.dim)}`,
+      );
+      await this.waitForNextRun(seconds);
       if (!this.running) {
         break;
       }
@@ -1052,7 +1408,7 @@ class CodexTimer {
   }
 
   async cleanup() {
-    this.running = false;
+    this.stopNow();
     await appendLog("INFO", tr("定时任务已停止", "Timer stopped"));
     await this.closePrompt();
   }
@@ -1124,8 +1480,11 @@ async function cli(argv = process.argv) {
 
   const timer = new CodexTimer();
   const signalHandler = async () => {
-    console.log(tr("\n\n🛑 收到停止信号，正在关闭...", "\n\n🛑 Received a stop signal. Shutting down..."));
-    timer.running = false;
+    if (timer.stopping) {
+      return;
+    }
+    writeConsoleLine(tr("\n🛑 收到停止信号，正在关闭...", "\n🛑 Received a stop signal. Shutting down..."));
+    timer.stopNow();
   };
 
   process.on("SIGINT", signalHandler);
@@ -1146,6 +1505,7 @@ module.exports = {
   CodexTimer,
   cli,
   cronMatches,
+  displayWidth,
   extractLastUserMessage,
   matchStopKeyword,
   nextCronRun,
@@ -1158,8 +1518,10 @@ module.exports = {
   LANGUAGE_OPTIONS,
   normalizeLanguage,
   parseCliArguments,
+  quoteAppleScriptString,
   setActiveLanguage,
   tr,
+  wrapText,
 };
 
 if (require.main === module) {
