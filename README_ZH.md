@@ -6,6 +6,10 @@
 
 它基于官方 `@openai/codex-sdk`，只显示当前目录对应的会话，并把所有运行数据写入当前项目内的 `.codex_timer/` 目录。
 
+## 预览
+
+![codex_timer 终端预览](./demo/image.png)
+
 安装成全局命令后，你进入任意项目目录，都可以直接执行：
 
 ```bash

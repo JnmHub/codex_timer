@@ -6,6 +6,10 @@ English documentation: Chinese version is available at [README_ZH.md](./README_Z
 
 It uses the official `@openai/codex-sdk`, filters sessions by the current working directory, and stores all runtime data in a local `.codex_timer/` folder inside the project.
 
+## Preview
+
+![codex-timer terminal preview](./demo/image.png)
+
 Once installed globally, you can enter any project and run:
 
 ```bash
