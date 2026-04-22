@@ -394,6 +394,23 @@ function timestampForFilename(date = new Date()) {
   )}${pad(date.getSeconds())}`;
 }
 
+function parseStopKeywords(raw) {
+  return String(raw || "")
+    .split(/[,\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function matchStopKeyword(text, keywords) {
+  const source = String(text || "");
+  for (const keyword of keywords || []) {
+    if (keyword && source.includes(keyword)) {
+      return keyword;
+    }
+  }
+  return null;
+}
+
 class CodexTimer {
   constructor() {
     this.codex = null;
@@ -563,7 +580,7 @@ class CodexTimer {
   describeApprovalPolicy() {
     const policy = this.getApprovalPolicy();
     const mapping = {
-      never: "不确认",
+      never: tr("不确认", "Never"),
       "on-request": tr("需要确认", "Ask for confirmation"),
       untrusted: tr("仅不可信操作确认", "Confirm only untrusted actions"),
       "on-failure": tr("失败后再确认", "Confirm after failure"),
@@ -590,12 +607,22 @@ class CodexTimer {
     return mapping[level] || level;
   }
 
+  describeStopKeywords() {
+    const keywords = Array.isArray(this.config.stop_keywords) ? this.config.stop_keywords : [];
+    if (keywords.length === 0) {
+      return tr("未启用", "Disabled");
+    }
+    return keywords.join(", ");
+  }
+
   async promptChoice(title, options, defaultValue) {
     const currentOption = options.find((option) => option.value === defaultValue) || options[0];
     console.log(`\n${title}`);
     options.forEach((option) => {
-      console.log(`${option.key}. ${option.label}`);
-      console.log(`   ${option.description}`);
+      const label = typeof option.getLabel === "function" ? option.getLabel() : option.label;
+      const description = typeof option.getDescription === "function" ? option.getDescription() : option.description;
+      console.log(`${option.key}. ${label}`);
+      console.log(`   ${description}`);
     });
 
     while (true) {
@@ -630,6 +657,19 @@ class CodexTimer {
       TRUST_LEVEL_OPTIONS,
       this.getTrustLevel(),
     );
+  }
+
+  async promptStopKeywords() {
+    const currentValue = Array.isArray(this.config.stop_keywords) ? this.config.stop_keywords.join(", ") : "";
+    console.log(tr("\n🛑 自动停止关键词：", "\n🛑 Auto-stop keywords:"));
+    console.log(
+      tr(
+        "当 Codex 输出包含任意关键词时，自动结束当前任务循环。多个关键词用英文逗号分隔，留空表示禁用。",
+        "When the Codex output contains any keyword, the current task loop stops automatically. Separate multiple keywords with commas. Leave empty to disable.",
+      ),
+    );
+    const raw = await this.promptWithDefault(tr("请输入停止关键词", "Enter stop keywords"), currentValue);
+    this.config.stop_keywords = parseStopKeywords(raw);
   }
 
   async rebindThreadWithCurrentConfig() {
@@ -717,6 +757,7 @@ class CodexTimer {
       console.log(`   ${tr("沙箱模式", "Sandbox mode")}: ${this.describeSandboxMode()}`);
       console.log(`   ${tr("审批策略", "Approval policy")}: ${this.describeApprovalPolicy()}`);
       console.log(`   ${tr("信任级别", "Trust level")}: ${this.describeTrustLevel()}`);
+      console.log(`   ${tr("停止关键词", "Stop keywords")}: ${this.describeStopKeywords()}`);
       if (this.config.preset_message) {
         console.log(`   ${tr("预设消息", "Preset message")}: ${this.config.preset_message}`);
       }
@@ -796,6 +837,7 @@ class CodexTimer {
     await this.promptSandboxMode();
     await this.promptApprovalPolicy();
     await this.promptTrustLevel();
+    await this.promptStopKeywords();
 
     console.log(tr("\n📝 任务内容设置：", "\n📝 Message Configuration:"));
     if (this.config.schedule_mode === "continuous") {
@@ -828,6 +870,7 @@ class CodexTimer {
     console.log(`   ${tr("沙箱模式", "Sandbox mode")}: ${this.describeSandboxMode()}`);
     console.log(`   ${tr("审批策略", "Approval policy")}: ${this.describeApprovalPolicy()}`);
     console.log(`   ${tr("信任级别", "Trust level")}: ${this.describeTrustLevel()}`);
+    console.log(`   ${tr("停止关键词", "Stop keywords")}: ${this.describeStopKeywords()}`);
     console.log(`   ${tr("请求超时", "Request timeout")}: ${tr("不限制", "Unlimited")}`);
     if (this.config.preset_message) {
       console.log(`   ${tr("预设消息", "Preset message")}: ${this.config.preset_message}`);
@@ -948,10 +991,23 @@ class CodexTimer {
       console.log(tr(`✅ 完整响应已保存到: ${responseFile}`, `✅ Full response saved to: ${responseFile}`));
 
       await appendLog("INFO", tr(`任务 #${this.taskCounter} 执行成功`, `Task #${this.taskCounter} completed successfully`));
+      const matchedKeyword = matchStopKeyword(response, this.config.stop_keywords || []);
+      if (matchedKeyword) {
+        this.running = false;
+        await appendLog(
+          "INFO",
+          tr(`命中停止关键词，自动结束任务: ${matchedKeyword}`, `Matched stop keyword, ending task automatically: ${matchedKeyword}`),
+        );
+        console.log(
+          tr(`🛑 命中停止关键词，已自动结束任务: ${matchedKeyword}`, `🛑 Matched stop keyword. Task stopped automatically: ${matchedKeyword}`),
+        );
+      }
+      return { success: true, response, matchedKeyword };
     } catch (error) {
       clearInterval(progressTimer);
       await appendLog("ERROR", tr(`任务执行失败: ${error.message}`, `Task failed: ${error.message}`));
       console.log(tr(`❌ 任务执行失败: ${error.message}`, `❌ Task failed: ${error.message}`));
+      return { success: false, response: "", matchedKeyword: null };
     }
   }
 
@@ -972,7 +1028,10 @@ class CodexTimer {
 
     const initialMessage = await this.getMessageToSend(true);
     if (initialMessage) {
-      await this.executeTask(initialMessage);
+      const result = await this.executeTask(initialMessage);
+      if (result.matchedKeyword) {
+        return;
+      }
     }
 
     while (this.running) {
@@ -984,7 +1043,10 @@ class CodexTimer {
       }
       const message = await this.getMessageToSend(false);
       if (message) {
-        await this.executeTask(message);
+        const result = await this.executeTask(message);
+        if (result.matchedKeyword) {
+          break;
+        }
       }
     }
   }
@@ -1085,9 +1147,11 @@ module.exports = {
   cli,
   cronMatches,
   extractLastUserMessage,
+  matchStopKeyword,
   nextCronRun,
   normalizePreview,
   parseCronField,
+  parseStopKeywords,
   PROJECT_DIR,
   CONFIG_DIR,
   HOME_PREFERENCES_FILE,
