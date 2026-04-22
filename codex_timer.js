@@ -1129,8 +1129,8 @@ class CodexTimer {
     printSection(tr("📝 任务内容设置", "📝 Message Configuration"), "accent");
     if (this.config.schedule_mode === "continuous") {
       console.log(tr("连续执行模式固定使用同一条消息。", "Continuous mode always uses the same preset message."));
-      const defaultMessage = this.config.preset_message || this.config.last_message || defaultMessage();
-      const presetMessage = await this.promptWithDefault(tr("请输入预设消息", "Enter a preset message"), defaultMessage);
+      const defaultPromptMessage = this.config.preset_message || this.config.last_message || defaultMessage();
+      const presetMessage = await this.promptWithDefault(tr("请输入预设消息", "Enter a preset message"), defaultPromptMessage);
       this.config.preset_message = presetMessage;
       this.config.message_mode = "preset";
     } else {
@@ -1138,8 +1138,8 @@ class CodexTimer {
       console.log(tr("2. 首次手动输入，后续自动沿用上次消息", "2. Enter the first message manually, then reuse it automatically"));
       const choice = await this.prompt(tr("\n请选择 (1/2): ", "\nChoose (1/2): "));
       if (choice === "1") {
-        const defaultMessage = this.config.preset_message || this.config.last_message || defaultMessage();
-        const presetMessage = await this.promptWithDefault(tr("请输入预设消息", "Enter a preset message"), defaultMessage);
+        const defaultPromptMessage = this.config.preset_message || this.config.last_message || defaultMessage();
+        const presetMessage = await this.promptWithDefault(tr("请输入预设消息", "Enter a preset message"), defaultPromptMessage);
         this.config.preset_message = presetMessage;
         this.config.message_mode = "preset";
       } else {
